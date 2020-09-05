@@ -1,0 +1,490 @@
+---
+title: "Bank Telemarketing"
+author: "Oleh Bohoslavets"
+date: "9/5/2020"
+output: html_document
+---
+
+# A data-driven approach to predict the success of bank telemarketing
+
+### Input variables:
+#### Bank client data:
+
+1 - age (numeric)
+
+2 - job : type of job (categorical: "admin.","blue-collar","entrepreneur","housemaid","management","retired","self-employed","services","student","technician","unemployed","unknown")
+
+3 - marital : marital status (categorical: "divorced","married","single","unknown"; note: "divorced" means divorced or widowed)
+
+4 - education (categorical: "basic.4y","basic.6y","basic.9y","high.school","illiterate","professional.course","university.degree","unknown")
+
+5 - default: has credit in default? (categorical: "no","yes","unknown")
+
+6 - housing: has housing loan? (categorical: "no","yes","unknown")
+
+7 - loan: has personal loan? (categorical: "no","yes","unknown")
+
+#### Related with the last contact of the current campaign:
+
+ 8 - contact: contact communication type (categorical: "cellular","telephone")
+ 
+ 9 - month: last contact month of year (categorical: "jan", "feb", "mar", ..., "nov", "dec")
+ 
+10 - day_of_week: last contact day of the week (categorical: "mon","tue","wed","thu","fri")
+
+11 - duration: last contact duration, in seconds (numeric). Important note:  this attribute highly affects the output target (e.g., if duration=0 then y="no"). Yet, the duration is not known before a call is performed. Also, after the end of the call y is obviously known. Thus, this input should only be included for benchmark purposes and should be discarded if the intention is to have a realistic predictive model.
+
+#### Other attributes:
+
+12 - campaign: number of contacts performed during this campaign and for this client (numeric, includes last contact)
+
+13 - pdays: number of days that passed by after the client was last contacted from a previous campaign (numeric; 999 means client was not previously contacted)
+
+14 - previous: number of contacts performed before this campaign and for this client (numeric)
+
+15 - poutcome: outcome of the previous marketing campaign (categorical: "failure","nonexistent","success")
+
+#### Social and economic context attributes
+
+16 - emp.var.rate: employment variation rate - quarterly indicator (numeric)
+
+17 - cons.price.idx: consumer price index - monthly indicator (numeric)
+
+18 - cons.conf.idx: consumer confidence index - monthly indicator (numeric)
+
+19 - euribor3m: euribor 3 month rate - daily indicator (numeric)
+
+20 - nr.employed: number of employees - quarterly indicator (numeric)
+
+### Output variable (desired target):
+
+21 - y - has the client subscribed a term deposit? (binary: "yes","no")
+
+### Missing Attribute Values: 
+
+There are several missing values in some categorical attributes, all coded with the "unknown" label. These missing values can be treated as a possible class label or using deletion or imputation techniques.
+
+```{r setup, message=FALSE, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+library(knitr)
+library(tidyverse)
+library(gridExtra)
+library(reshape2)
+library(caret)
+library(caTools)
+library(e1071)
+library(MLmetrics)
+library(MLeval)
+```
+
+
+```{r, echo=FALSE}
+data = read.csv("D:/Data Analytics/bank-additional/bank-additional.csv", sep = ";")
+data[sapply(data, is.character)] <- lapply(data[sapply(data, is.character)], as.factor)
+data$y <- factor(data$y, levels = c("yes", "no"))
+```
+
+### Data Visualization
+
+Dimensions of the dataset: `r dim(data)[1][1]` rows and `r dim(data)[2][1]` columns.
+
+```{r}
+## Variable summary: 
+str(data)
+## Let's glance at the top of the table:
+kable(head(data))
+## Summary of the variables:
+summary(data)
+```
+
+
+```{r, echo=FALSE}
+ggplot(data, aes(x=age))+
+  geom_histogram(aes(y = ..density..),
+                 binwidth = 1,
+                 colour = "black",
+                 fill = "white")+
+  geom_density(alpha = .4, fill = "lightgreen")+
+  ggtitle("Density Plot of Age")+
+  xlab("Age")+
+  ylab("Density")
+```
+
+
+
+```{r, echo=FALSE, message=FALSE, fig.height= 14, fig.width= 10}
+create_barplot <- function(data, ...){ #function to summarize the categorical variables in barchart
+  my_table <- function(data, ...){ # prepare data for plotting
+    data %>%
+      group_by_(...)%>%
+      summarise(count = n())
+  }
+  table <- as.data.frame(my_table(data, ...))
+  ggplot(table, aes(x = reorder(table[,1],table[,2]), y = table[,2]))+
+    geom_bar(stat = "identity", colour = "darkblue", fill = "lightblue")+
+    ggtitle(paste("Bar chart of " , ...))+
+    xlab(...)+
+    ylab("Count")+
+    coord_flip()
+}
+cat_vars <- names(data[sapply(data, is.factor)]) #select categorical variables
+cat_plot <- list()
+for (i in cat_vars){    #create a barchart for selected categorical variables
+  cat_plot[i] <- list(create_barplot(data, i))
+}
+grid.arrange(cat_plot$job, cat_plot$marital, cat_plot$education, cat_plot$default, 
+             cat_plot$housing, cat_plot$loan, cat_plot$contact, cat_plot$month, 
+             cat_plot$day_of_week, cat_plot$poutcome, cat_plot$y, nrow = 4, ncol = 3)
+```
+
+Barcharts show the distributions of customers in each category. Bar chart of y (response variable) shows that the data is imbalanced, we will have to take this into account when building models and evaluating their performance
+
+There are several missing values in some categorical attributes, all coded with the "unknown" label. 
+These missing values will be treated as a class label.
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(data, aes(x=duration))+
+  geom_histogram(aes(y = ..density..),
+                 binwidth = 20,
+                 colour = "black",
+                 fill = "white")+
+  geom_density(alpha = .4, fill = "lightgreen")+
+  xlab("Last contact duration, in seconds")+
+  ylab("Density")+
+  ggtitle("Density plot of last contact duration")
+```
+
+Important note:  this attribute highly affects the output target (e.g., if duration=0 then y='no'). 
+Yet, the duration is not known before a call is performed. Also, after the end of the call y is obviously known. 
+Thus, this input should only be included for benchmark purposes and should be discarded if the intention is to have a realistic predictive model.
+
+```{r, echo=FALSE, message=FALSE}
+p1 <- ggplot(data[data[,"pdays"]!=999,], aes(x=as.factor(pdays)))+
+  geom_bar(colour = "black",
+           fill = "lightblue")+
+  ggtitle("Number of days that passed by after the client \nwas last contacted from a previous campaign")+
+  xlab("Number of days passed")+
+  ylab("Count")
+data1 <- data%>%
+  mutate(not_contacted = as.numeric(ifelse(pdays == 999, "1", "0")))
+p2 <- ggplot(data1, aes(x = as.factor(not_contacted)))+
+  geom_bar(colour = "black",
+           fill = c("lightblue", "white"))+
+  ggtitle("Not Contacted from previous campaign")+
+  xlab("")+
+  ylab("Count")
+grid.arrange(p1, p2, nrow = 1, top = "Counts of clients")
+```
+
+```{r, echo=FALSE, message=FALSE, fig.width=14, fig.height=10}
+p3 <- ggplot(data, aes(x=campaign))+
+  geom_histogram(binwidth = 1,
+                 colour = "black",
+                 fill = "white")+
+  ggtitle("Histogram Plot of Contact")+
+  xlab("Number of contacts performed during this campaign")+
+  ylab("Count")
+
+p4 <- ggplot(data, aes(x=emp.var.rate))+
+  geom_histogram(aes(y = ..count..),
+                 colour = "black",
+                 fill = "white")+
+  ggtitle("Histogram Plot of employment variation rate")+
+  xlab("Employment variation rate")+
+  ylab("Count")
+
+p5 <- ggplot(data, aes(x=cons.price.idx))+
+  geom_histogram(aes(y = ..count..),
+                 colour = "black",
+                 fill = "white")+
+  ggtitle("Histogram Plot of consumer price index")+
+  xlab("Consumer price index")+
+  ylab("Count")
+
+p6 <- ggplot(data, aes(x=cons.conf.idx))+
+  geom_histogram(aes(y = ..count..),
+                 colour = "black",
+                 fill = "white")+
+  ggtitle("Histogram Plot of consumer confidence index")+
+  xlab("Consumer confidence index")+
+  ylab("Count")
+
+p7 <- ggplot(data, aes(x=cons.conf.idx))+
+  geom_histogram(aes(y = ..count..),
+                 colour = "black",
+                 fill = "white")+
+  ggtitle("Histogram Plot of euribor 3 month rate")+
+  xlab("euribor 3 month rate")+
+  ylab("Count")
+
+p8 <- ggplot(data, aes(x=nr.employed ))+
+  geom_histogram(colour = "black",
+                 fill = "white")+
+  ggtitle("Number of employees")+
+  xlab("Number of employees")+
+  ylab("Count")
+grid.arrange(p3, p4, p5, p6, p7, p8,  nrow = 2, ncol = 3, top = "Histogram Plots")
+```
+
+
+```{r, echo=FALSE, message=FALSE}
+plot_data <- data%>%
+  group_by(y)%>%
+  mutate(group.mean.age = mean(age))%>%
+  ungroup()
+ggplot(plot_data, aes(x = age, fill = y))+
+  geom_density(alpha = 0.5)+
+  geom_vline(aes(xintercept = group.mean.age, color = y), 
+             linetype = "dashed")+
+  ggtitle("Density plot of Age by Seccess")+
+  theme_bw(base_size = 12) +
+  xlab("Age")+
+  ylab("Density")
+
+```
+
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(data, aes(x = campaign , fill = y))+
+  geom_bar(position = "fill")+
+  ggtitle("Proportion of Success by number of contacts performed during this campaign")+
+  theme(plot.title = element_text(size=13))+
+  xlab("Campaign")+
+  ylab("Proportion")
+```
+
+Proportions plot of success by campaign shows that the chance of a person subscribing to term deposit after 12 phone calls is close to 0.
+There is no need to call people more than that and there are more efficient ways to allocate time of calling employees.
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(data[data[,"pdays"]!=999,], aes(x = pdays, fill = y))+
+  geom_density(alpha = 0.5, position = "dodge")+
+  ggtitle("Density plot of days that passed by after the client was last contacted by Success")+
+  theme(plot.title = element_text(size=13))+
+  xlab("pdays")+
+  ylab("Density")
+```
+
+3 to 7 days that passed by after the client was last contacted from a previous campaign is the optimal time for a successful call
+
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(data, aes(x = previous , fill = y))+
+  geom_bar(position = "dodge")+
+  ggtitle("Bar plot of number of contacts performed before this campaign by success")+
+  theme(plot.title = element_text(size=13))+
+  xlab("previous ")+
+  ylab("Count")
+```
+
+
+```{r, echo=FALSE, message=FALSE}
+p3 <- ggplot(data, aes(x = emp.var.rate, fill = y))+
+  geom_histogram()+
+  ggtitle("")+
+  xlab("Employment variation rate")+
+  ylab("Count")+
+  theme(legend.position = "none")
+p4 <- ggplot(data, aes(x = emp.var.rate, fill = y))+
+  geom_histogram(position = "fill")+
+  ggtitle("")+
+  xlab("Employment variation rate")+
+  ylab("Proportion")
+grid.arrange(p3, p4, nrow = 1, top = "Success by employment variation rate")
+```
+
+It appears that we have the higher rate of success when the Employment variation rate is negative
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(data, aes(x = cons.price.idx, fill = y))+
+  geom_histogram()+
+  ggtitle("Counts of Success by consumer price index")+
+  theme(plot.title = element_text(size=13))+
+  xlab("Monthly consumer price index")+
+  ylab("Count")+
+  scale_x_continuous(breaks=seq(90,95,0.5))
+```
+
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(data, aes(x = cons.conf.idx, fill = y))+
+  geom_histogram()+
+  ggtitle("Counts of Success by consumer confidence index")+
+  theme(plot.title = element_text(size=13))+
+  xlab("Monthly consumer confidence index")+
+  ylab("Count")
+```
+
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(data, aes(x = euribor3m, fill = y))+
+  geom_histogram(binwidth = .1)+
+  ggtitle("Counts of Success by Euro Interbank Offered Rate ")+
+  theme(plot.title = element_text(size=13))+
+  xlab("Euro Interbank Offered Rate")+
+  ylab("Count")
+```
+
+The lower the Euro Interbank Offered Rate the higher chance of success
+Which is intuitive because low interest rates mean more spending money in consumers' pockets
+
+```{r, echo=FALSE, message=FALSE}
+ggplot(data, aes(x = nr.employed, fill = y))+
+  geom_histogram()+
+  ggtitle("Counts of Success by number of employees")+
+  theme(plot.title = element_text(size=13))+
+  xlab("Number of employees")+
+  ylab("Count")
+```
+
+
+```{r, echo=FALSE, message=FALSE}
+p5 <- ggplot(data, aes(x = poutcome, fill = y))+
+  geom_bar()+
+  xlab("Previous outcome")+
+  ylab("Count")+
+  theme(legend.position = "none")
+p6 <- ggplot(data, aes(x = poutcome, fill = y))+
+  geom_bar(position = "fill")+
+  xlab("Previous outcome")+
+  ylab("Proportion")
+grid.arrange(p5, p6, nrow = 1, top = "Success by outcome of the previous marketing campaign")
+```
+
+### 2. Data Preparation
+
+```{r}
+effect <- dummyVars(~ job + marital + education + default + housing + loan + month + day_of_week + poutcome, data = data)
+dummies <- as.data.frame(predict(effect, data))
+data <- bind_cols(data, dummies)
+exclude <- names(data) %in% c("job","duration","marital","education","default","housing",
+                              "loan","contact","month","day_of_week","poutcome","job.admin.",
+                              "marital.divorced","education.basic.4y","default.no","housing.no",
+                              "loan.no","month.apr","day_of_week.fri","poutcome.failure")
+```
+
+Exclude duration because this attribute highly affects the output target (e.g., if duration=0 then y="no"). 
+Yet, the duration is not known before a call is performed. Also, after the end of the call y is obviously known. 
+Thus, this input should only be included for benchmark purposes and should be discarded if the intention is to have a realistic predictive model.
+
+```{r}
+data <- data[,!exclude]
+str(data)
+```
+
+Correlation matrix of all variables that are going to be used for the model building
+
+```{r, echo= FALSE, fig.width=10, fig.height=10}
+data2 <- data
+data2$y <- as.numeric(data2$y)
+data2 <- data2 %>% relocate(y, .before = everything())
+cormat <- round(cor(data2),2)
+melted_cormat <- melt(cormat)
+
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2)) + 
+  geom_tile(aes(fill=value))+
+  scale_fill_gradient2() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Split data into training and test set
+
+```{r}
+set.seed(1234)
+trainIndex <- createDataPartition(data$y, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+
+dataTrain <- data[ trainIndex,]
+dataTest  <- data[-trainIndex,]
+```
+
+### 3. Model Building and Evaluation
+
+In our case the data is very imbalanced, predicting correctly that the client subscribed a term deposit is a lot more important 
+than correctly prdeicting that they did not subscrib a term deposit 
+This means that in our case the overall accuracy is not a good measurefor evaluating the classifier
+
+We will do 10 fold cross-validation
+
+Because the data is very imbalanced, when running Caret we must select 'prSummary' summaryFunction to calculate the area under precision-recall curve for each test data, this is used to select the best model from searching across all parameters
+
+```{r}
+ctrl <- trainControl(method="cv", summaryFunction=prSummary, classProbs=T,
+                     savePredictions = T,
+                     verboseIter = F)
+```
+
+
+```{r, echo=FALSE}
+fit1 <- train(y ~ ., data = dataTrain, #Boosted Logistic Regression
+             trControl = ctrl,     
+             method = "LogitBoost",
+             metric = "AUC")
+fit1
+fit2 <- train(y ~ ., data = dataTrain, #k-Nearest Neighbors
+              trControl = ctrl,     
+              method = "knn",
+              metric = "AUC")
+fit2
+fit3 <- train(y ~ ., data = dataTrain, #Random Forest
+              trControl = ctrl,     
+              method = "rf",
+              metric = "AUC")
+fit3
+iterationsnn <- capture.output(fit4 <- train(y ~ ., data = dataTrain, #Neural Network
+              trControl = ctrl,     
+              method = "nnet",
+              metric = "AUC"))
+fit4
+iterationsgbm <- capture.output(fit5 <- train(y ~ ., data = dataTrain, #Stochastic Gradient Boosting
+              trControl = ctrl,     
+              method = "gbm",
+              metric = "AUC"))
+fit5
+```
+
+Running on Caret train output: single group, imbalanced data
+Very imbalanced data requires special consideration where we are interested just in the positive class. In these situations the ROC gives a overly optimistic picture of the situation because it does not directly consider false positives in the positive fraction. So we can use the precision-recall curve or the precision-recall gain curve, and the area under these as metrics. These work in the same way as a ROC, but precision vs recall is plotted while we change the probability required for a positive parameter.
+
+```{r, message=FALSE}
+res <- evalm(list(fit1,fit2,fit3,fit4,fit5),gnames=c("LogitBoost","knn","rf","nnet","gbm"), silent = TRUE)
+```
+
+Since our data is highly imbalances in our case we need to evaluate AUC-PR, AUC-PRG coeficients
+Based on AUC-PRG the best performing models are rf and gbm
+Based on AUC-PR the best performing models are LogitBoost, NNet and gbm
+
+Now lets predict class membership using cutoff 0.50 (we could change the model's cutoff based on clients requirements when we build models)
+
+```{r, message=FALSE}
+finalfit <- predict(fit5, dataTest)
+dataTest <- bind_cols(dataTest, finalfit)
+dataTest <- rename(dataTest, Prediction = ...53)
+confusionMatrix(dataTest$Prediction, dataTest$y)
+```
+
+We now turn to predictive goal of detecting, among a set of new records, the ones most likely to belong to a class of interest. 
+Note:This differs from a goal of predicting class membership for each record
+
+Let's build the lift curve for our models and determine how effectively we can "skim the cream" by selecting relatively small number of cases and getting a relatively large portion of the subscribers
+
+```{r}
+results <- data.frame(y = dataTest$y)
+results$LogitBoost <- predict(fit1, dataTest, type = "prob")[,"yes"]
+results$knn <- predict(fit2, dataTest, type = "prob")[,"yes"]
+results$rf <- predict(fit3, dataTest, type = "prob")[,"yes"]
+results$nnet <- predict(fit4, dataTest, type = "prob")[,"yes"]
+results$gbm <- predict(fit5, dataTest, type = "prob")[,"yes"]
+head(results)
+```
+
+```{r}
+trellis.par.set(caretTheme())
+lift_obj <- lift(y ~ LogitBoost + knn + rf + nnet + gbm, data = results)
+plot(lift_obj, values = 60, auto.key = list(columns = 5,
+                                            lines = TRUE,
+                                            points = FALSE))
+```
+
+From this we can see that, to find 60 percent of the subscribers, a little less than 30 percent of the data can be sampled when ordered by the probability predictions) The knn model does somewhat better than the other models. 
